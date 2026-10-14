@@ -14,7 +14,7 @@ export default function GameOver() {
     <div className="overlay-container">
       <div className="overlay-backdrop death-backdrop" />
       <div className="overlay-panel death-panel">
-        <div className="death-icon">☠</div>
+        <div className="death-icon">✕</div>
         <div className="overlay-title death-title">KIA</div>
         <div className="overlay-subtitle">KILLED IN ACTION</div>
         <div className="overlay-divider" />

@@ -2,14 +2,13 @@
 export const MISSIONS = [
   {
     id: 'mission_1',
-    name: 'FIRST CONTACT',
-    brief: 'Eliminate hostile forces in the combat zone. Engage and neutralize all enemy combatants.',
+    name: 'OPERATION KESTREL',
+    brief: 'Insurgents hold the village checkpoint and the walled compound north of FOB Kestrel. Push through, clear the compound and neutralise their commander.',
     objectives: [
-      { id: 'obj_eliminate', text: 'Eliminate all hostile units and the Wraith commander', type: 'eliminate', target: 10, current: 0 },
-      { id: 'obj_survive', text: 'Keep at least one squad member alive', type: 'survive', target: 1, current: 3 },
+      { id: 'obj_eliminate', text: 'Clear hostile positions', type: 'eliminate', target: 9, current: 0 },
+      { id: 'obj_commander', text: 'Neutralise the compound commander', type: 'commander', target: 1, current: 0 },
+      { id: 'obj_survive', text: 'Keep your squad alive', type: 'survive', target: 1, current: 3 },
     ],
-    enemyCount: 10,
-    friendlyCount: 3,
     rewards: { xp: 500, credits: 200 },
     unlocked: true,
     completed: false,

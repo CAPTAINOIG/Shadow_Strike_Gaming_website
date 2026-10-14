@@ -16,7 +16,7 @@ export default function MissionComplete() {
     <div className="overlay-container">
       <div className="overlay-backdrop success-backdrop" />
       <div className="overlay-panel success-panel">
-        <div className="success-icon">⭐</div>
+        <div className="success-icon">◆</div>
         <div className="overlay-title success-title">MISSION COMPLETE</div>
         <div className="overlay-subtitle">{currentMission.name}</div>
         <div className="overlay-divider" />

@@ -5,15 +5,15 @@ export default function HowToPlay({ onBack }) {
   const controls = [
     { key: 'W A S D', action: 'Move' },
     { key: 'Mouse', action: 'Look / Aim' },
-    { key: 'Left Click', action: 'Shoot' },
-    { key: 'Right Click', action: 'Aim Down Sights' },
+    { key: 'Left Click', action: 'Fire' },
+    { key: 'Right Click (hold)', action: 'Aim down sights / scope' },
     { key: 'Shift', action: 'Sprint' },
-    { key: 'Space', action: 'Jump' },
-    { key: 'C', action: 'Toggle Crouch' },
+    { key: 'Space', action: 'Jump / stand up' },
+    { key: 'C or Ctrl', action: 'Toggle crouch (use cover)' },
     { key: 'R', action: 'Reload' },
-    { key: '1 - 4', action: 'Switch Weapon' },
-    { key: 'E', action: 'Interact' },
-    { key: 'Esc', action: 'Pause Game' },
+    { key: '1 / 2 / 3 or Wheel', action: 'Carbine / Shotgun / Bolt-action' },
+    { key: 'Q', action: 'Swap camera shoulder' },
+    { key: 'Esc', action: 'Pause' },
   ];
 
   return (
@@ -41,29 +41,24 @@ export default function HowToPlay({ onBack }) {
         <div className="how-to-section">
           <h3 className="how-to-heading">OBJECTIVES</h3>
           <p className="how-to-text">
-            Complete mission objectives shown in the top-right corner of the HUD.
-            Eliminate enemies, collect intel, and reach the extraction zone marked
-            by a green beacon.
+            Push north from FOB Kestrel, clear the village checkpoint and the ruins, then breach the walled compound and neutralise its commander. Objectives are listed top-left; the compass marker points to the compound.
           </p>
         </div>
 
         <div className="how-to-section">
           <h3 className="how-to-heading">WEAPONS</h3>
           <p className="how-to-text">
-            Switch between 4 weapons using number keys. Each weapon has different
-            damage, fire rate, and accuracy. Collect ammo pickups (orange boxes)
-            to resupply. Health pickups (green boxes) restore 25 HP.
+            You carry an M4 carbine, a pump shotgun and a bolt-action rifle, each with its own magazine and reserve. Aiming tightens your spread; moving, jumping and sustained fire widen it. Armour absorbs most incoming damage and recharges when you avoid fire.
           </p>
         </div>
 
         <div className="how-to-section">
           <h3 className="how-to-heading">TIPS</h3>
           <ul className="how-to-list">
-            <li>Use cover to avoid enemy fire</li>
-            <li>Aim down sights for better accuracy</li>
-            <li>Reload before entering combat</li>
-            <li>Use the sniper rifle for distant enemies</li>
-            <li>The shotgun is devastating at close range</li>
+            <li>Crouch behind sandbags, walls and vehicles: cover really stops bullets</li>
+            <li>Enemies hear gunfire and will search where they last saw you</li>
+            <li>Headshots deal far more damage than limb hits</li>
+            <li>Reload in cover; your squad will hold positions near you</li>
           </ul>
         </div>
       </div>

@@ -1,527 +1,487 @@
-// Shadow Strike: Last Stand - Player Controller
-import React, { useRef, useEffect, useCallback, useState } from 'react';
+// Shadow Strike: Last Stand - Player controller and third-person camera.
+import React, { useEffect, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import CharacterModel from './CharacterModel';
 import { useGameStore, GAME_STATES } from '../store/gameStore';
 import { combatSystem } from '../systems/combatSystem';
+import { collisionWorld } from '../systems/collisionWorld';
 import { audioManager } from '../systems/audioManager';
-import { findCoverSnap } from '../systems/coverSystem';
+import { fireRound, onNearMiss } from '../systems/ballistics';
+import { fx } from '../systems/fx';
+import { loadSoldier } from './soldierAssets';
+import { PLAYER_SPAWN } from '../data/battlefieldLayout';
 
-const MOVE_SPEED = 6;
-const SPRINT_SPEED = 10;
-const MOUSE_SENSITIVITY = 0.002;
-const CAMERA_DISTANCE = 4.6;
-const CAMERA_HEIGHT = 2.05;
-const CAMERA_SHOULDER = 0.85;
+const RADIUS = 0.32;
+const STAND_HEIGHT = 1.75;
+const CROUCH_HEIGHT = 1.2;
+const GRAVITY = 17;
+const SPEED = { run: 3.7, sprint: 5.9, aim: 1.9, crouch: 1.45, crouchAim: 1.15 };
+const CAMERA = {
+  normal: { distance: 2.75, shoulder: 0.62, height: 0.1, fov: 66 },
+  aim: { distance: 1.35, shoulder: 0.5, height: 0.06, fov: 50 },
+  sprint: { distance: 3.05, shoulder: 0.55, height: 0.08, fov: 72 },
+  scope: { distance: 0.9, shoulder: 0.42, height: 0.04, fov: 20 },
+};
+
+const yawOf = (x, z) => Math.atan2(-x, -z);
+const angleDelta = (a, b) => THREE.MathUtils.euclideanModulo(b - a + Math.PI, Math.PI * 2) - Math.PI;
+
+function createState() {
+  return {
+    pos: new THREE.Vector3(PLAYER_SPAWN.x, 0, PLAYER_SPAWN.z),
+    vel: new THREE.Vector3(),
+    vy: 0,
+    grounded: true,
+    yaw: PLAYER_SPAWN.yaw,
+    pitch: -0.05,
+    bodyYaw: PLAYER_SPAWN.yaw,
+    crouch: false,
+    sprint: false,
+    aimHeld: false,
+    fireHeld: false,
+    firePressed: false,
+    lastShot: -10,
+    lastCombat: -10,
+    recoilAccum: 0,
+    bloom: 0,
+    shoulder: 1,
+    pivot: new THREE.Vector3(PLAYER_SPAWN.x, 1.6, PLAYER_SPAWN.z),
+    camDistance: CAMERA.normal.distance,
+    fov: CAMERA.normal.fov,
+    shake: 0,
+    shotsFired: 0,
+    dead: false,
+    deathTime: 0,
+    lastPublish: 0,
+    lastHitSeen: 0,
+    hitFlinch: 0,
+    lastSpread: -1,
+    aimPoint: new THREE.Vector3(),
+  };
+}
 
 export default function Player() {
+  const modelRef = useRef();
   const groupRef = useRef();
-  const playerRef = useRef();
-  const cameraTargetRef = useRef(new THREE.Vector3());
-  const positionRef = useRef(new THREE.Vector3(0, 0, 5));
-  const yawRef = useRef(0);
-  const bodyYawRef = useRef(0);
-  const pitchRef = useRef(-0.02);
-  const walkCycleRef = useRef(0);
-  const cameraRaycasterRef = useRef();
-  if (!cameraRaycasterRef.current) cameraRaycasterRef.current = new THREE.Raycaster();
-  const cameraTargetObjectRef = useRef(new THREE.Vector3());
-  const cameraRightRef = useRef(new THREE.Vector3());
-  const cameraForwardRef = useRef(new THREE.Vector3());
-  const cameraOriginRef = useRef(new THREE.Vector3());
-  const cameraOffsetRef = useRef(new THREE.Vector3());
-  const cameraDirectionRef = useRef(new THREE.Vector3());
-  const cameraObstacleMeshesRef = useRef([]);
-  const cameraObstacleScanRef = useRef(0);
+  const stateRef = useRef(null);
+  if (!stateRef.current) stateRef.current = createState();
+  const keys = useRef({ w: false, a: false, s: false, d: false, shift: false });
+  const mouse = useRef({ dx: 0, dy: 0, dragging: false });
+  const touchMove = useRef({ x: 0, y: 0 });
+  const gripRef = useRef(null);
 
-  const keysRef = useRef({ w: false, a: false, s: false, d: false, shift: false });
-  const mouseRef = useRef({ dx: 0, dy: 0, locked: false });
-  const touchMoveRef = useRef({ x: 0, y: 0 });
-  const jumpVelocityRef = useRef(0);
-  const grenadeUntilRef = useRef(0);
-  const shootingRef = useRef(false);
-  const coverRef = useRef(false);
-  const lastShotTime = useRef(0);
-  const publishedYawRef = useRef(0);
-
-  const { camera, gl, scene } = useThree();
+  const { camera, gl } = useThree();
   const gameState = useGameStore((s) => s.gameState);
-  const inVehicle = useGameStore((s) => s.inVehicle);
-  const playerShoot = useGameStore((s) => s.playerShoot);
-  const startReload = useGameStore((s) => s.startReload);
-  const togglePause = useGameStore((s) => s.togglePause);
-  const playerWeapon = useGameStore((s) => s.playerWeapon);
-  const isReloading = useGameStore((s) => s.isReloading);
-  const isShooting = useGameStore((s) => s.isShooting);
-  const triggerHitMarker = useGameStore((s) => s.triggerHitMarker);
-  const addEffect = useGameStore((s) => s.addEffect);
-  const addKill = useGameStore((s) => s.addKill);
-  const raiseWantedLevel = useGameStore((s) => s.raiseWantedLevel);
-  const cameraShake = useGameStore((s) => s.cameraShake);
-  const setCameraShake = useGameStore((s) => s.setCameraShake);
-  const isAiming = useGameStore((s) => s.isAiming);
-  const setAiming = useGameStore((s) => s.setAiming);
-  const setInCover = useGameStore((s) => s.setInCover);
-  const selectWeapon = useGameStore((s) => s.selectWeapon);
-  const cycleWeapon = useGameStore((s) => s.cycleWeapon);
-  const mouseSensitivity = useGameStore((s) => s.mouseSensitivity);
-  const regenerateShield = useGameStore((s) => s.regenerateShield);
+  const runId = useGameStore((s) => s.runId);
+  const weaponModel = useGameStore((s) => s.playerWeapon.model);
+  const active = gameState === GAME_STATES.PLAYING || gameState === GAME_STATES.PAUSED;
 
+  useEffect(() => { loadSoldier().then((asset) => { gripRef.current = asset.grip; }).catch(() => {}); }, []);
+
+  // Reset for each new run and register with the combat system.
   useEffect(() => {
-    const timer = setInterval(() => {
-      const current = useGameStore.getState();
-      if (current.gameState === GAME_STATES.PLAYING
-        && Date.now() - current.lastShieldHitTime > 3600
-        && current.playerShield < current.playerMaxShield) regenerateShield(4);
-    }, 250);
-    return () => clearInterval(timer);
-  }, [regenerateShield]);
-
-  const [soldierState, setSoldierState] = useState('idle');
-  const [showFlash, setShowFlash] = useState(false);
-
-  // Register player in combat system
-  useEffect(() => {
-    if (gameState !== GAME_STATES.PLAYING) return undefined;
-    combatSystem.register('player', {
-      team: 'player',
-      x: 0, y: 0, z: 5,
-      health: 100,
+    if (!runId) return undefined;
+    stateRef.current = createState();
+    if (import.meta.env.DEV && window.__game) window.__game.player = stateRef.current;
+    const entry = combatSystem.register('player', {
+      team: 'player', x: PLAYER_SPAWN.x, y: 0, z: PLAYER_SPAWN.z, health: 100, name: 'YOU',
+      onDamage: (amount, info) => {
+        useGameStore.getState().damagePlayer(amount, info.from);
+        return useGameStore.getState().playerHealth <= 0;
+      },
     });
-    return () => combatSystem.unregister('player');
-  }, [gameState]);
+    entry.handle = modelRef.current || null;
+    const off = onNearMiss(() => { stateRef.current.shake = Math.max(stateRef.current.shake, 0.35); });
+    return () => { off(); combatSystem.unregister('player'); };
+  }, [runId]);
 
+  // Keyboard
   useEffect(() => {
-    if (gameState !== GAME_STATES.PLAYING) return;
-    positionRef.current.set(0, 0, 5);
-    yawRef.current = 0;
-    bodyYawRef.current = 0;
-    pitchRef.current = -0.02;
-    mouseRef.current.dx = 0;
-    mouseRef.current.dy = 0;
-  }, [gameState]);
-
-  useEffect(() => {
-    if (inVehicle) return;
-    const current = useGameStore.getState();
-    positionRef.current.set(current.playerPosition.x, current.playerPosition.y, current.playerPosition.z);
-    yawRef.current = current.playerRotation;
-    bodyYawRef.current = current.playerRotation;
-  }, [inVehicle]);
-
-  // Keep health synced
-  const playerHealth = useGameStore((s) => s.playerHealth);
-  const lastHitTime = useGameStore((s) => s.lastHitTime);
-  useEffect(() => {
-    combatSystem.update('player', { health: playerHealth, alive: playerHealth > 0 });
-  }, [playerHealth]);
-
-  // Keyboard listeners
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      const key = e.key.toLowerCase();
-      if (key === 'w' || key === 'arrowup') keysRef.current.w = true;
-      if (key === 'a' || key === 'arrowleft') keysRef.current.a = true;
-      if (key === 's' || key === 'arrowdown') keysRef.current.s = true;
-      if (key === 'd' || key === 'arrowright') keysRef.current.d = true;
-      if (key === 'shift') keysRef.current.shift = true;
-      if (key === '1') selectWeapon('assault_rifle');
-      if (key === '2') selectWeapon('shotgun');
-      if (key === '3') selectWeapon('sniper');
-      if (key === 'c' || key === 'control') {
-        coverRef.current = !coverRef.current;
-        setInCover(coverRef.current);
+    const down = (event) => {
+      const store = useGameStore.getState();
+      const key = event.key.toLowerCase();
+      if (key === 'escape') { store.togglePause(); return; }
+      if (store.gameState !== GAME_STATES.PLAYING) return;
+      const s = stateRef.current;
+      if (key === 'w' || key === 'arrowup') keys.current.w = true;
+      if (key === 'a' || key === 'arrowleft') keys.current.a = true;
+      if (key === 's' || key === 'arrowdown') keys.current.s = true;
+      if (key === 'd' || key === 'arrowright') keys.current.d = true;
+      if (key === 'shift') keys.current.shift = true;
+      if (event.repeat) return;
+      if (key === 'c' || key === 'control') { s.crouch = !s.crouch; store.setCrouching(s.crouch); }
+      if (key === ' ' && s.grounded && !s.dead) {
+        if (s.crouch) { s.crouch = false; store.setCrouching(false); } else { s.vy = 5.3; s.grounded = false; }
       }
-      if (key === ' ' && positionRef.current.y <= 0.001) jumpVelocityRef.current = 5.2;
-      if (key === 'g' && gameState === GAME_STATES.PLAYING) grenadeUntilRef.current = Date.now() + 900;
-      if (key === 'r' && gameState === GAME_STATES.PLAYING) {
-        startReload();
-        audioManager.playReload(0.3);
-      }
-      if (key === 'escape') {
-        if (document.pointerLockElement) {
-          document.exitPointerLock();
-        }
-        togglePause();
+      if (key === 'r') reload();
+      if (key === 'q') s.shoulder *= -1;
+      if (key === '1') store.selectWeapon('assault_rifle');
+      if (key === '2') store.selectWeapon('shotgun');
+      if (key === '3') store.selectWeapon('sniper');
+    };
+    const up = (event) => {
+      const key = event.key.toLowerCase();
+      if (key === 'w' || key === 'arrowup') keys.current.w = false;
+      if (key === 'a' || key === 'arrowleft') keys.current.a = false;
+      if (key === 's' || key === 'arrowdown') keys.current.s = false;
+      if (key === 'd' || key === 'arrowright') keys.current.d = false;
+      if (key === 'shift') keys.current.shift = false;
+    };
+    const blur = () => { Object.keys(keys.current).forEach((k) => { keys.current[k] = false; }); stateRef.current.fireHeld = false; };
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    window.addEventListener('blur', blur);
+    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); window.removeEventListener('blur', blur); };
+  }, []);
+
+  // Mouse, pointer lock and touch controls.
+  useEffect(() => {
+    const canvas = gl.domElement;
+    const move = (event) => {
+      if (document.pointerLockElement === canvas || mouse.current.dragging) {
+        mouse.current.dx += event.movementX;
+        mouse.current.dy += event.movementY;
       }
     };
-    const handleKeyUp = (e) => {
-      const key = e.key.toLowerCase();
-      if (key === 'w' || key === 'arrowup') keysRef.current.w = false;
-      if (key === 'a' || key === 'arrowleft') keysRef.current.a = false;
-      if (key === 's' || key === 'arrowdown') keysRef.current.s = false;
-      if (key === 'd' || key === 'arrowright') keysRef.current.d = false;
-      if (key === 'shift') keysRef.current.shift = false;
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
-    };
-  }, [gameState, startReload, togglePause, selectWeapon, setInCover]);
-
-  // Mouse movement listener
-  useEffect(() => {
-    const handleMouseMove = (e) => {
-      if (document.pointerLockElement || mouseRef.current.dragging) {
-        mouseRef.current.dx += e.movementX;
-        mouseRef.current.dy += e.movementY;
+    const downHandler = (event) => {
+      const store = useGameStore.getState();
+      if (store.gameState !== GAME_STATES.PLAYING) return;
+      if (event.target !== canvas && document.pointerLockElement !== canvas) return;
+      if (document.pointerLockElement !== canvas) {
+        try { canvas.requestPointerLock?.()?.catch?.(() => {}); } catch { /* drag-to-aim fallback */ }
       }
+      mouse.current.dragging = true;
+      if (event.button === 0) { stateRef.current.fireHeld = true; stateRef.current.firePressed = true; }
+      if (event.button === 2) { stateRef.current.aimHeld = true; store.setAiming(true); }
     };
-    window.addEventListener('mousemove', handleMouseMove);
-    const handleTouchAim = (event) => {
-      mouseRef.current.dx += event.detail.dx;
-      mouseRef.current.dy += event.detail.dy;
+    const upHandler = (event) => {
+      if (event.button === 0) stateRef.current.fireHeld = false;
+      if (event.button === 2) { stateRef.current.aimHeld = false; useGameStore.getState().setAiming(false); }
+      if (event.buttons === 0) mouse.current.dragging = false;
     };
-    const handleTouchMove = (event) => { touchMoveRef.current = event.detail; };
-    const handleTouchShoot = (event) => { shootingRef.current = event.detail.active; };
-    const handleAction = (event) => {
+    const wheel = (event) => {
+      const store = useGameStore.getState();
+      if (store.gameState === GAME_STATES.PLAYING && Math.abs(event.deltaY) > 20) store.cycleWeapon();
+    };
+    const contextMenu = (event) => event.preventDefault();
+    const touchAim = (event) => { mouse.current.dx += event.detail.dx; mouse.current.dy += event.detail.dy; };
+    const touchMoveHandler = (event) => { touchMove.current = event.detail; };
+    const touchShoot = (event) => { stateRef.current.fireHeld = event.detail.active; if (event.detail.active) stateRef.current.firePressed = true; };
+    const action = (event) => {
+      const store = useGameStore.getState();
+      const s = stateRef.current;
       const { type } = event.detail;
-      if (type === 'reload') startReload();
-      if (type === 'aim') setAiming(!useGameStore.getState().isAiming);
-      if (type === 'cover') {
-        coverRef.current = !coverRef.current;
-        setInCover(coverRef.current);
-      }
-      if (type === 'jump' && positionRef.current.y <= 0.001) jumpVelocityRef.current = 5.2;
-      if (type === 'weapon') cycleWeapon();
+      if (type === 'reload') reload();
+      if (type === 'aim') { s.aimHeld = !s.aimHeld; store.setAiming(s.aimHeld); }
+      if (type === 'cover' || type === 'crouch') { s.crouch = !s.crouch; store.setCrouching(s.crouch); }
+      if (type === 'jump' && s.grounded) { s.vy = 5.3; s.grounded = false; }
+      if (type === 'weapon') store.cycleWeapon();
     };
-    window.addEventListener('game:aim', handleTouchAim);
-    window.addEventListener('game:move', handleTouchMove);
-    window.addEventListener('game:shoot', handleTouchShoot);
-    window.addEventListener('game:action', handleAction);
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mousedown', downHandler);
+    window.addEventListener('mouseup', upHandler);
+    window.addEventListener('wheel', wheel, { passive: true });
+    window.addEventListener('contextmenu', contextMenu);
+    window.addEventListener('game:aim', touchAim);
+    window.addEventListener('game:move', touchMoveHandler);
+    window.addEventListener('game:shoot', touchShoot);
+    window.addEventListener('game:action', action);
     return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('game:aim', handleTouchAim);
-      window.removeEventListener('game:move', handleTouchMove);
-      window.removeEventListener('game:shoot', handleTouchShoot);
-      window.removeEventListener('game:action', handleAction);
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mousedown', downHandler);
+      window.removeEventListener('mouseup', upHandler);
+      window.removeEventListener('wheel', wheel);
+      window.removeEventListener('contextmenu', contextMenu);
+      window.removeEventListener('game:aim', touchAim);
+      window.removeEventListener('game:move', touchMoveHandler);
+      window.removeEventListener('game:shoot', touchShoot);
+      window.removeEventListener('game:action', action);
     };
-  }, [startReload, setAiming, setInCover, cycleWeapon]);
+  }, [gl]);
 
-  // Click to shoot + pointer lock
-  useEffect(() => {
-    const handleMouseDown = (e) => {
-      if (e.button === 2) {
-        e.preventDefault();
-        mouseRef.current.dragging = true;
-        setAiming(true);
-        return;
-      }
-      if (e.button !== 0) return;
-      if (gameState !== GAME_STATES.PLAYING) return;
+  function reload() {
+    const store = useGameStore.getState();
+    if (stateRef.current.dead) return;
+    if (store.startReload()) audioManager.reload(store.playerWeapon.reloadTime, null, store.playerWeapon.id === 'shotgun' ? 'shotgun' : 'rifle');
+  }
 
-      // Pointer lock supports continuous aim; mouse dragging remains available
-      // when the browser or embedded preview refuses pointer lock.
-      if (!document.pointerLockElement) {
-        try {
-          const lockRequest = gl.domElement.requestPointerLock?.();
-          lockRequest?.catch?.(() => {});
-        } catch { /* drag aiming remains active */ }
-      }
-      mouseRef.current.dragging = true;
-      shootingRef.current = true;
-    };
-
-    const handleMouseUp = (e) => {
-      if (e.button === 0) { shootingRef.current = false; mouseRef.current.dragging = false; }
-      if (e.button === 2) { mouseRef.current.dragging = false; setAiming(false); }
-    };
-    const handleContextMenu = (event) => event.preventDefault();
-
-    const shootLoop = setInterval(() => {
-      if (shootingRef.current && gameState === GAME_STATES.PLAYING && !isReloading) {
-        const now = Date.now();
-        if (now - lastShotTime.current >= playerWeapon.fireRate * 1000) {
-          const didShoot = playerShoot();
-          if (didShoot) {
-            lastShotTime.current = now;
-            audioManager.playGunshot(0.4, positionRef.current, playerWeapon.id);
-            setShowFlash(true);
-            setTimeout(() => setShowFlash(false), 60);
-
-            // Raycast for hit detection
-            performShot();
-          }
-        }
-      }
-    }, 50);
-
-    window.addEventListener('mousedown', handleMouseDown);
-    window.addEventListener('mouseup', handleMouseUp);
-    window.addEventListener('contextmenu', handleContextMenu);
-    return () => {
-      window.removeEventListener('mousedown', handleMouseDown);
-      window.removeEventListener('mouseup', handleMouseUp);
-      window.removeEventListener('contextmenu', handleContextMenu);
-      clearInterval(shootLoop);
-    };
-  }, [gameState, isReloading, playerWeapon, playerShoot, setAiming]);
-
-  // Perform a shot - check if we hit an enemy
-  const performShot = useCallback(() => {
-    const pos = positionRef.current;
-    const yaw = yawRef.current;
-    const pitch = pitchRef.current;
-    const forward = new THREE.Vector3(
-      -Math.sin(yaw) * Math.cos(pitch),
-      Math.sin(pitch),
-      -Math.cos(yaw) * Math.cos(pitch)
-    );
-
-    // Check all enemies for hit
-    const enemies = combatSystem.getEnemiesOf('player');
-    let bestHit = null;
-    let bestDist = playerWeapon.range;
-
-    for (const enemy of enemies) {
-      if (!enemy.alive) continue;
-      const toEnemy = new THREE.Vector3().subVectors(enemy.position, pos);
-      toEnemy.y = 1;
-      const dist = toEnemy.length();
-      if (dist > playerWeapon.range) continue;
-
-      // Check angle (within a cone)
-      toEnemy.normalize();
-      const dot = forward.dot(toEnemy);
-      const angleTolerance = 0.15 + (playerWeapon.spread * 2);
-      if (dot > (1 - angleTolerance) && dist < bestDist) {
-        bestDist = dist;
-        bestHit = enemy;
-      }
+  function shoot(s, now, store, muzzle, aimPoint) {
+    const weapon = store.playerWeapon;
+    if (store.isReloading) return;
+    if (now - s.lastShot < weapon.fireRate) return;
+    if (!weapon.auto && !s.firePressed) return;
+    s.firePressed = false;
+    if (store.playerAmmo <= 0) {
+      if (s.lastShot !== -1) { audioManager.dryFire(); s.lastShot = now; }
+      if (store.playerReserveAmmo > 0) reload();
+      return;
     }
+    if (!store.consumeAmmo()) return;
+    s.lastShot = now;
+    s.lastCombat = now;
+    s.shotsFired += 1;
 
-    if (bestHit) {
-      // Accuracy roll
-      if (combatSystem.checkHit(0.75, bestDist, playerWeapon.range)) {
-        // Hit!
-        const newHealth = bestHit.health - playerWeapon.damage;
-        if (bestHit.team === 'civilian' || bestHit.team === 'police') raiseWantedLevel(1);
-        combatSystem.update(bestHit.id, { health: newHealth });
-        if (newHealth <= 0) {
-          combatSystem.update(bestHit.id, { alive: false });
-          if (bestHit.team !== 'civilian' && bestHit.team !== 'police') addKill();
-          audioManager.playDeath(0.3);
-        } else {
-          audioManager.playImpact(0.2);
-        }
-        triggerHitMarker();
-        // Impact effect
-        addEffect({
-          type: 'impact',
-          position: bestHit.position.clone(),
-          lifetime: 300,
-        });
-      }
+    // The round leaves the real muzzle. If the barrel is poking through a wall,
+    // it starts at the shoulder instead so it cannot pass through geometry.
+    const shoulder = _shoulder.copy(s.pivot).addScaledVector(_right.set(Math.cos(s.yaw), 0, -Math.sin(s.yaw)), 0.18 * s.shoulder);
+    shoulder.y -= 0.2;
+    const toMuzzle = _tmp.subVectors(muzzle, shoulder);
+    const muzzleDistance = toMuzzle.length();
+    const blocked = collisionWorld.raycast(shoulder, toMuzzle.normalize(), muzzleDistance, (c) => c.bullets);
+    const origin = blocked ? shoulder : muzzle;
+    const direction = _dir.subVectors(aimPoint, origin).normalize();
+
+    const moving = Math.hypot(s.vel.x, s.vel.z);
+    const baseSpread = s.aimHeld ? weapon.aimSpread : weapon.spread;
+    const spread = (baseSpread + s.bloom) * (1 + moving * 0.22) * (s.crouch ? 0.75 : 1) * (s.grounded ? 1 : 2.5);
+    const { hits } = fireRound({ shooterId: 'player', origin, direction, weapon, spread, tracer: s.shotsFired % 2 === 1 || weapon.pellets, noiseRadius: 90 });
+    s.bloom = Math.min(s.bloom + (weapon.auto ? 0.0035 : 0.01), weapon.auto ? 0.03 : 0.05);
+
+    // Recoil: immediate kick, mostly recovered over the next few frames.
+    const kick = weapon.recoil * (s.aimHeld ? 0.75 : 1) * (s.crouch ? 0.8 : 1);
+    s.pitch += kick;
+    s.recoilAccum += kick * 0.75;
+    s.yaw += (Math.random() - 0.4) * weapon.recoilYaw;
+    s.shake = Math.max(s.shake, weapon.pellets || weapon.id === 'sniper' ? 0.5 : 0.18);
+    const animator = modelRef.current?.animator;
+    if (animator) animator.params.recoil = Math.min(1.6, animator.params.recoil + (weapon.pellets ? 1.4 : weapon.id === 'sniper' ? 1.6 : 0.6));
+
+    fx.muzzleFlash(muzzle, direction, weapon.pellets ? 1.4 : weapon.id === 'sniper' ? 1.5 : 1);
+    if (!weapon.pellets) {
+      const eject = _tmp.copy(muzzle).addScaledVector(direction, -0.42);
+      const side = _right.set(-direction.z, 0, direction.x).normalize();
+      fx.shell(eject, side.multiplyScalar(1.6 + Math.random()).add(_up.set(0, 1.6 + Math.random(), 0)));
     }
+    audioManager.gunshot(weapon.sound, muzzle, { isPlayer: true });
+    if (weapon.id === 'sniper') audioManager.bolt();
 
-    // Muzzle flash effect at player position
-    const muzzlePos = pos.clone().add(forward.clone().multiplyScalar(1.2));
-    muzzlePos.y += 0.95;
-    addEffect({
-      type: 'tracer',
-      from: muzzlePos,
-      to: bestHit ? bestHit.position.clone().setY(1) : muzzlePos.clone().add(forward.multiplyScalar(50)),
-      lifetime: 100,
-    });
-  }, [playerWeapon, addKill, raiseWantedLevel, triggerHitMarker, addEffect]);
+    if (hits.length) {
+      const kill = hits.some((h) => h.killed);
+      const headshot = hits.some((h) => h.headshot);
+      store.triggerHitMarker({ kill, headshot });
+      audioManager.hitmarker(kill);
+    }
+  }
 
-  // Main game loop
   useFrame((_, delta) => {
-    if (gameState !== GAME_STATES.PLAYING || inVehicle) return;
-    if (!groupRef.current) return;
+    const store = useGameStore.getState();
+    if (store.gameState !== GAME_STATES.PLAYING && store.gameState !== GAME_STATES.GAME_OVER) return;
+    const s = stateRef.current;
+    const dt = Math.min(delta, 0.05);
+    const now = performance.now() / 1000;
+    const handle = modelRef.current;
+    const entry = combatSystem.get('player');
+    if (entry && handle && entry.handle !== handle) entry.handle = handle;
+    const weapon = store.playerWeapon;
+    const grip = gripRef.current;
 
-    const dt = Math.min(delta, 0.05); // cap delta
-
-    // Mouse rotation
-    const dx = mouseRef.current.dx;
-    const dy = mouseRef.current.dy;
-    mouseRef.current.dx = 0;
-    mouseRef.current.dy = 0;
-    yawRef.current -= dx * MOUSE_SENSITIVITY * (mouseSensitivity * 1.8);
-    pitchRef.current = THREE.MathUtils.clamp(
-      pitchRef.current - dy * MOUSE_SENSITIVITY * (mouseSensitivity * 1.8),
-      -0.42,
-      0.38
-    );
-
-    // Movement
-    const keys = keysRef.current;
-    const speed = keys.shift && !coverRef.current ? SPRINT_SPEED : coverRef.current ? MOVE_SPEED * 0.48 : MOVE_SPEED;
-    const moveDir = new THREE.Vector3();
-
-    moveDir.z = (keys.s ? 1 : 0) - (keys.w ? 1 : 0) - touchMoveRef.current.y;
-    moveDir.x = (keys.d ? 1 : 0) - (keys.a ? 1 : 0) + touchMoveRef.current.x;
-
-    const isMoving = moveDir.length() > 0;
-    const worldDir = new THREE.Vector3();
-    if (isMoving) {
-      moveDir.normalize();
-      // Rotate movement direction by yaw
-      const cos = Math.cos(yawRef.current);
-      const sin = Math.sin(yawRef.current);
-      worldDir.set(
-        moveDir.x * cos - moveDir.z * sin,
-        0,
-        moveDir.x * sin + moveDir.z * cos
-      );
-      positionRef.current.add(worldDir.multiplyScalar(speed * dt));
-      walkCycleRef.current += dt * speed * 0.5;
+    // --- Death
+    if (store.playerHealth <= 0 && !s.dead) {
+      s.dead = true; s.deathTime = now; s.fireHeld = false;
+      if (entry) entry.alive = false;
+      audioManager.bodyFall(s.pos);
+      if (document.pointerLockElement) document.exitPointerLock();
     }
-    if (jumpVelocityRef.current !== 0 || positionRef.current.y > 0) {
-      positionRef.current.y = Math.max(0, positionRef.current.y + jumpVelocityRef.current * dt);
-      jumpVelocityRef.current = positionRef.current.y === 0 ? 0 : jumpVelocityRef.current - 12 * dt;
+
+    // --- Look
+    const zoomed = s.aimHeld && weapon.zoomFov;
+    const sensitivity = 0.0021 * (0.35 + store.mouseSensitivity * 1.3) * (s.aimHeld ? (zoomed ? 0.32 : 0.62) : 1);
+    if (!s.dead) {
+      s.yaw -= mouse.current.dx * sensitivity;
+      s.pitch -= mouse.current.dy * sensitivity;
     }
-    if (coverRef.current) {
-      const cover = findCoverSnap(scene, positionRef.current, 3.2);
-      if (cover) {
-        positionRef.current.lerp(cover.position, Math.min(1, dt * 12));
-        yawRef.current = THREE.MathUtils.damp(yawRef.current, Math.atan2(-cover.normal.x, -cover.normal.z), 10, dt);
-      } else {
-        coverRef.current = false;
-        setInCover(false);
+    mouse.current.dx = 0; mouse.current.dy = 0;
+    const recover = Math.min(s.recoilAccum, s.recoilAccum * 9 * dt + 0.0005);
+    s.pitch -= recover; s.recoilAccum -= recover;
+    s.pitch = THREE.MathUtils.clamp(s.pitch, -1.15, 1.05);
+    s.bloom = Math.max(0, s.bloom - dt * (s.fireHeld ? 0.02 : 0.08));
+
+    // --- Movement intent
+    const k = keys.current;
+    let ix = (k.d ? 1 : 0) - (k.a ? 1 : 0) + touchMove.current.x;
+    let iz = (k.w ? 1 : 0) - (k.s ? 1 : 0) + touchMove.current.y;
+    const inputLength = Math.hypot(ix, iz);
+    if (inputLength > 1) { ix /= inputLength; iz /= inputLength; }
+    if (s.dead) { ix = 0; iz = 0; }
+    const fwdX = -Math.sin(s.yaw); const fwdZ = -Math.cos(s.yaw);
+    const rightX = Math.cos(s.yaw); const rightZ = -Math.sin(s.yaw);
+    const wishX = fwdX * iz + rightX * ix; const wishZ = fwdZ * iz + rightZ * ix;
+    const moving = Math.hypot(wishX, wishZ) > 0.1;
+    const combatMode = s.aimHeld || s.fireHeld || now - s.lastShot < 1.1 || store.isReloading || s.crouch;
+    s.sprint = k.shift && moving && !s.aimHeld && !s.fireHeld && !s.crouch && s.grounded && iz > -0.2;
+    if (s.sprint && store.isReloading) s.sprint = false;
+    const targetSpeed = !moving ? 0 : s.sprint ? SPEED.sprint : s.crouch ? (s.aimHeld ? SPEED.crouchAim : SPEED.crouch) : s.aimHeld ? SPEED.aim : SPEED.run;
+    const accel = s.grounded ? (targetSpeed > Math.hypot(s.vel.x, s.vel.z) ? 11 : 13) : 2;
+    const scale = Math.min(1, Math.hypot(ix, iz));
+    s.vel.x = THREE.MathUtils.damp(s.vel.x, moving ? wishX / Math.hypot(wishX, wishZ) * targetSpeed * scale : 0, accel, dt);
+    s.vel.z = THREE.MathUtils.damp(s.vel.z, moving ? wishZ / Math.hypot(wishX, wishZ) * targetSpeed * scale : 0, accel, dt);
+
+    // --- Integrate with collision (walls slide, steps and stairs climb).
+    const height = s.crouch ? CROUCH_HEIGHT : STAND_HEIGHT;
+    const before = _before.copy(s.pos);
+    s.pos.x += s.vel.x * dt; s.pos.z += s.vel.z * dt;
+    collisionWorld.resolveCircle(s.pos, RADIUS, s.pos.y, height, 0.45);
+    s.vel.x = (s.pos.x - before.x) / Math.max(dt, 1e-4);
+    s.vel.z = (s.pos.z - before.z) / Math.max(dt, 1e-4);
+    const support = collisionWorld.supportHeight(s.pos.x, s.pos.z, RADIUS, s.pos.y, 0.45);
+    if (s.grounded) {
+      if (support < s.pos.y - 0.06) { s.grounded = false; s.vy = 0; } else s.pos.y = support > s.pos.y ? THREE.MathUtils.damp(s.pos.y, support, 22, dt) : support;
+    }
+    if (!s.grounded) {
+      s.vy -= GRAVITY * dt;
+      s.pos.y += s.vy * dt;
+      const ceiling = collisionWorld.ceilingHeight(s.pos.x, s.pos.z, s.pos.y + 0.5);
+      if (s.pos.y + height > ceiling) { s.pos.y = ceiling - height; s.vy = Math.min(s.vy, 0); }
+      if (s.pos.y <= support) {
+        if (s.vy < -6) { s.shake = Math.max(s.shake, 0.3); audioManager.footstep(s.pos, { isPlayer: true, speed: 6 }); }
+        s.pos.y = support; s.vy = 0; s.grounded = true;
       }
     }
 
-    // Keep body facing aligned to the mouse-controlled heading. Walking back
-    // stays a real backpedal; the player can turn fully around with mouse drag.
-    const targetBodyYaw = yawRef.current;
-    const turnDifference = THREE.MathUtils.euclideanModulo(targetBodyYaw - bodyYawRef.current + Math.PI, Math.PI * 2) - Math.PI;
-    bodyYawRef.current += turnDifference * (1 - Math.exp(-12 * dt));
-    bodyYawRef.current = THREE.MathUtils.euclideanModulo(bodyYawRef.current + Math.PI, Math.PI * 2) - Math.PI;
+    // --- Camera pivot (vertically smoothed so stairs do not jolt the view).
+    const eye = s.crouch ? 1.22 : 1.6;
+    s.pivot.x = s.pos.x; s.pivot.z = s.pos.z;
+    s.pivot.y = THREE.MathUtils.damp(s.pivot.y, s.pos.y + eye, 14, dt);
+    const camDir = _camDir.set(-Math.sin(s.yaw) * Math.cos(s.pitch), Math.sin(s.pitch), -Math.cos(s.yaw) * Math.cos(s.pitch));
 
-    // Update soldier model
-    const wasHit = lastHitTime > 0 && Date.now() - lastHitTime < 350;
-    const state = playerHealth <= 0
-      ? 'dead'
-      : positionRef.current.y > 0.015
-      ? 'jump'
-      : wasHit
-        ? 'hit'
-        : Date.now() < grenadeUntilRef.current
-          ? 'grenade'
-          : isReloading
-            ? 'reloading'
-            : isShooting
-              ? 'shooting'
-              : isMoving
-                ? (keys.shift
-                  ? (moveDir.z > 0.45 ? 'run_back' : 'running')
-                  : moveDir.z > 0.45
-                    ? 'backward'
-                    : Math.abs(moveDir.x) > 0.45
-                      ? (moveDir.x < 0 ? 'strafe_left' : 'strafe_right')
-                      : keys.shift ? 'running' : 'walking')
-                : coverRef.current
-                  ? 'cover'
-                  : Math.abs(turnDifference) > 0.06
-                    ? (turnDifference > 0 ? 'turn_left' : 'turn_right')
-                    : isAiming ? 'aiming' : 'idle';
-    if (state !== soldierState) setSoldierState(state);
+    // --- Aim point: what is under the crosshair (traced past the player).
+    const camPos = camera.position;
+    const skip = Math.max(0, _tmp.subVectors(s.pivot, camPos).dot(camDir)) + 0.3;
+    const rayOrigin = _rayOrigin.copy(camPos).addScaledVector(camDir, skip);
+    const hit = combatSystem.traceBullet(rayOrigin, camDir, 400, 'player');
+    s.aimPoint.copy(hit ? hit.point : _tmp.copy(rayOrigin).addScaledVector(camDir, 400));
 
-    // Position the group
-    groupRef.current.position.copy(positionRef.current);
-    groupRef.current.rotation.y = bodyYawRef.current;
-    if (Math.abs(THREE.MathUtils.euclideanModulo(bodyYawRef.current - publishedYawRef.current + Math.PI, Math.PI * 2) - Math.PI) > 0.035) {
-      publishedYawRef.current = bodyYawRef.current;
-      useGameStore.getState().setPlayerRotation(bodyYawRef.current);
+    // --- Body facing
+    const shoulderY = s.pos.y + (grip?.shoulderHeight || 1.4) * (s.crouch ? 0.7 : 1);
+    const toAimX = s.aimPoint.x - s.pos.x; const toAimZ = s.aimPoint.z - s.pos.z;
+    const aimYaw = Math.hypot(toAimX, toAimZ) > 1.2 ? yawOf(toAimX, toAimZ) : s.yaw;
+    const animator = handle?.animator;
+    const aimBlend = animator ? animator.aimBlend : 0;
+    let targetBody = s.bodyYaw;
+    if (combatMode || !moving) {
+      // Rifle on target: compensate the barrel's angle in the aiming pose.
+      if (combatMode || Math.abs(angleDelta(s.bodyYaw, s.yaw)) > 1.6) targetBody = aimYaw - (grip?.aimYaw || 0) * aimBlend;
+    } else {
+      targetBody = yawOf(s.vel.x, s.vel.z);
+    }
+    if (!s.dead) {
+      const turn = angleDelta(s.bodyYaw, targetBody);
+      const rate = combatMode ? 16 : s.sprint ? 7 : 10;
+      const step = turn * (1 - Math.exp(-rate * dt));
+      s.bodyYaw += step;
+      if (animator) animator.params.turnRate = moving ? 0 : step / Math.max(dt, 1e-4);
     }
 
-    // Update combat system
-    combatSystem.update('player', { position: positionRef.current });
-    useGameStore.getState().setPlayerPosition({
-      x: positionRef.current.x,
-      y: positionRef.current.y,
-      z: positionRef.current.z,
-    });
-
-    // Offset the camera over the right shoulder while keeping the player in frame.
-    const camYaw = isAiming || isReloading || shootingRef.current ? yawRef.current : bodyYawRef.current;
-    const camPitch = pitchRef.current;
-    const forward = new THREE.Vector3(
-      -Math.sin(camYaw) * Math.cos(camPitch),
-      Math.sin(camPitch),
-      -Math.cos(camYaw) * Math.cos(camPitch)
-    );
-    const right = cameraRightRef.current.set(Math.cos(camYaw), 0, -Math.sin(camYaw));
-    const cameraDistance = isAiming ? CAMERA_DISTANCE * 0.68 : CAMERA_DISTANCE;
-    const cameraShoulder = isAiming ? CAMERA_SHOULDER * 0.38 : CAMERA_SHOULDER;
-    const camOffset = cameraOffsetRef.current.set(
-      Math.sin(camYaw) * cameraDistance + right.x * cameraShoulder,
-      CAMERA_HEIGHT,
-      Math.cos(camYaw) * cameraDistance + right.z * cameraShoulder
-    );
-    const targetCamPos = positionRef.current.clone().add(camOffset);
-
-    const cameraOrigin = cameraOriginRef.current.copy(positionRef.current);
-    cameraOrigin.y += 1.35;
-    const cameraRay = cameraRaycasterRef.current;
-    const cameraDelta = cameraDirectionRef.current.copy(targetCamPos).sub(cameraOrigin);
-    const desiredDistance = cameraDelta.length();
-    cameraRay.set(cameraOrigin, cameraDelta.normalize());
-    cameraRay.far = desiredDistance;
-    if (cameraObstacleScanRef.current <= 0) {
-      cameraObstacleMeshesRef.current.length = 0;
-      scene.traverse((object) => {
-        if (object.userData.cameraObstacle && object.isMesh && object.visible) {
-          cameraObstacleMeshesRef.current.push(object);
-        }
-      });
-      cameraObstacleScanRef.current = 0.5;
-    }
-    cameraObstacleScanRef.current -= dt;
-    const obstruction = cameraRay.intersectObjects(cameraObstacleMeshesRef.current, false)
-      .find((hit) => hit.distance > 0.55 && hit.distance < desiredDistance);
-    if (obstruction) {
-      targetCamPos.copy(cameraOrigin).addScaledVector(
-        cameraRay.ray.direction,
-        Math.max(0.8, obstruction.distance - 0.3)
-      );
+    // --- Animator parameters
+    if (animator) {
+      const p = animator.params;
+      const fwd = _bodyFwd.set(-Math.sin(s.bodyYaw), 0, -Math.cos(s.bodyYaw));
+      const left = _bodyLeft.set(-Math.cos(s.bodyYaw), 0, Math.sin(s.bodyYaw));
+      const speed = Math.hypot(s.vel.x, s.vel.z);
+      p.speed = speed;
+      if (speed > 0.05) { p.dirZ = (s.vel.x * fwd.x + s.vel.z * fwd.z) / speed; p.dirX = (s.vel.x * left.x + s.vel.z * left.z) / speed; }
+      p.aim = combatMode ? 1 : 0;
+      p.sprint = s.sprint;
+      p.crouch = s.crouch;
+      p.airborne = !s.grounded && (s.vy > 0.5 || s.pos.y > support + 0.35);
+      p.dead = s.dead;
+      p.reloading = store.isReloading;
+      p.reload = store.isReloading ? (performance.now() - store.reloadStartedAt) / (weapon.reloadTime * 1000) : 0;
+      p.pitch = Math.atan2(s.aimPoint.y - shoulderY, Math.max(0.5, Math.hypot(toAimX, toAimZ)));
+      p.recoil = Math.max(0, p.recoil - dt * 9);
+      if (store.lastHitTime !== s.lastHitSeen) { s.lastHitSeen = store.lastHitTime; s.hitFlinch = 1; s.shake = Math.max(s.shake, 0.45); }
+      s.hitFlinch = Math.max(0, s.hitFlinch - dt * 2.5);
+      p.hit = s.hitFlinch;
     }
 
-    camera.position.lerp(targetCamPos, 0.12);
-
-    // Keep the target close enough that the third-person soldier stays clearly
-    // inside the lower-middle of the frame while still looking toward combat.
-    const lookTarget = cameraTargetObjectRef.current.copy(positionRef.current)
-      .addScaledVector(cameraForwardRef.current.copy(forward), isAiming ? 9 : 5.5);
-    lookTarget.y += 1.22;
-
-    cameraTargetRef.current.lerp(lookTarget, 0.12);
-    camera.lookAt(cameraTargetRef.current);
-    if (camera.isPerspectiveCamera) {
-      const targetFov = isAiming ? 43 : 60;
-      const nextFov = THREE.MathUtils.damp(camera.fov, targetFov, 7, dt);
-      if (Math.abs(nextFov - camera.fov) > 0.01) {
-        camera.fov = nextFov;
-        camera.updateProjectionMatrix();
-      }
+    // --- Firing (sprinting stops when the trigger is pulled)
+    if (s.fireHeld && !s.dead && handle?.weapon) {
+      if (s.sprint) s.sprint = false;
+      shoot(s, now, store, handle.getMuzzle(_muzzle), s.aimPoint);
     }
 
-    // Camera shake
-    if (cameraShake > 0.01) {
-      camera.position.x += (Math.random() - 0.5) * cameraShake * 0.3;
-      camera.position.y += (Math.random() - 0.5) * cameraShake * 0.2;
-      setCameraShake(cameraShake * 0.85);
+    // --- Place the soldier
+    if (groupRef.current) {
+      groupRef.current.position.copy(s.pos);
+      groupRef.current.rotation.y = s.bodyYaw + Math.PI;
+    }
+    if (entry) { entry.position.copy(s.pos); entry.crouching = s.crouch; entry.yaw = s.yaw; entry.speed = Math.hypot(s.vel.x, s.vel.z); }
+
+    // --- Camera: rotation follows the mouse directly; position is collision-checked.
+    const mode = zoomed ? CAMERA.scope : s.aimHeld ? CAMERA.aim : s.sprint ? CAMERA.sprint : CAMERA.normal;
+    const deathOrbit = s.dead ? Math.min(1, (now - s.deathTime) / 2) : 0;
+    const right = _right.set(Math.cos(s.yaw), 0, -Math.sin(s.yaw));
+    const shoulderOffset = mode.shoulder * s.shoulder;
+    const wantDistance = mode.distance + deathOrbit * 2.5;
+    const anchor = _anchor.copy(s.pivot).addScaledVector(right, shoulderOffset * 0.5);
+    anchor.y += mode.height + deathOrbit * 1.2;
+    const desired = _desired.copy(anchor).addScaledVector(right, shoulderOffset * 0.5).addScaledVector(camDir, -wantDistance);
+    const toCam = _tmp.subVectors(desired, anchor);
+    const camLen = toCam.length();
+    toCam.divideScalar(camLen);
+    const block = collisionWorld.raycast(anchor, toCam, camLen + 0.25, (c) => c.sight && c.solid);
+    const allowed = block ? Math.max(0.35, block.distance - 0.25) : camLen;
+    s.camDistance = allowed < s.camDistance ? allowed : THREE.MathUtils.damp(s.camDistance, allowed, 7, dt);
+    camera.position.copy(anchor).addScaledVector(toCam, s.camDistance);
+    // Keep the lens above the ground.
+    camera.position.y = Math.max(camera.position.y, collisionWorld.groundHeight + 0.25);
+    camera.rotation.set(s.pitch, s.yaw, 0, 'YXZ');
+    // Footstep bob while sprinting and recoil/impact shake.
+    const speedNow = Math.hypot(s.vel.x, s.vel.z);
+    if (s.sprint && s.grounded) camera.position.y += Math.sin(now * 11) * 0.025 * Math.min(1, speedNow / 5);
+    if (s.shake > 0.01) {
+      camera.rotation.x += (Math.random() - 0.5) * s.shake * 0.012;
+      camera.rotation.y += (Math.random() - 0.5) * s.shake * 0.012;
+      s.shake = Math.max(0, s.shake - dt * 3);
+    }
+    const targetFov = s.dead ? 60 : mode.fov;
+    s.fov = THREE.MathUtils.damp(s.fov, targetFov, zoomed ? 14 : 9, dt);
+    if (Math.abs(camera.fov - s.fov) > 0.01) { camera.fov = s.fov; camera.updateProjectionMatrix(); }
+    if (handle?.root) handle.root.visible = s.camDistance > 0.55 && !zoomed;
+    audioManager.updateListener(camera);
+
+    // --- Regeneration: armour after 5 s out of damage, health slowly after 8 s.
+    const sinceHit = (Date.now() - store.lastHitTime) / 1000;
+    if (!s.dead && store.lastHitTime && sinceHit > 5 && store.playerArmor < store.playerMaxArmor) store.regenerateArmor(dt * 12);
+    if (!s.dead && sinceHit > 8 && store.playerHealth < store.playerMaxHealth) useGameStore.setState({ playerHealth: Math.min(store.playerMaxHealth, store.playerHealth + dt * 4) });
+
+    // --- HUD data at a lower rate.
+    if (now - s.lastPublish > 0.1) {
+      s.lastPublish = now;
+      store.setPlayerPosition({ x: s.pos.x, y: s.pos.y, z: s.pos.z });
+      store.setPlayerRotation(s.yaw);
+      const baseSpread = s.aimHeld ? weapon.aimSpread : weapon.spread;
+      const spread = Math.round(((baseSpread + s.bloom) * (1 + speedNow * 0.22) * (s.crouch ? 0.75 : 1) * (s.grounded ? 1 : 2.5)) * 2000);
+      if (spread !== s.lastSpread) { s.lastSpread = spread; store.setCrosshairSpread(spread); }
     }
   });
 
-  if ((gameState !== GAME_STATES.PLAYING && gameState !== GAME_STATES.PAUSED) || inVehicle) return null;
+  if (!active && gameState !== GAME_STATES.GAME_OVER) return null;
 
   return (
-    <group ref={groupRef} userData={{ isCharacter: true }}>
-      <group ref={playerRef}>
-        <CharacterModel
-          team="player"
-          state={soldierState}
-          gender="male"
-          walkCycle={walkCycleRef.current}
-          showWeaponFlash={showFlash}
-        />
-      </group>
+    <group ref={groupRef} position={[PLAYER_SPAWN.x, 0, PLAYER_SPAWN.z]}>
+      <CharacterModel
+        key={runId}
+        ref={modelRef}
+        team="player"
+        weapon={weaponModel}
+        onStep={(speed) => audioManager.footstep(stateRef.current.pos, { isPlayer: true, speed })}
+      />
     </group>
   );
 }
+
+const _shoulder = new THREE.Vector3();
+const _right = new THREE.Vector3();
+const _tmp = new THREE.Vector3();
+const _dir = new THREE.Vector3();
+const _up = new THREE.Vector3();
+const _before = new THREE.Vector3();
+const _camDir = new THREE.Vector3();
+const _rayOrigin = new THREE.Vector3();
+const _bodyFwd = new THREE.Vector3();
+const _bodyLeft = new THREE.Vector3();
+const _muzzle = new THREE.Vector3();
+const _anchor = new THREE.Vector3();
+const _desired = new THREE.Vector3();

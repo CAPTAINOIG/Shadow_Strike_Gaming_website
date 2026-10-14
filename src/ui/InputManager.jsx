@@ -15,7 +15,10 @@ export default function InputManager() {
 
   useEffect(() => {
     const query = window.matchMedia('(pointer: coarse)');
-    const update = () => setTouchDevice(query.matches || navigator.maxTouchPoints > 0);
+    // Touch-screen laptops still have a mouse: only show touch controls when
+    // the primary pointer is coarse and no fine pointer is present.
+    const fine = window.matchMedia('(any-pointer: fine)');
+    const update = () => setTouchDevice(query.matches && !fine.matches);
     update();
     query.addEventListener?.('change', update);
     return () => query.removeEventListener?.('change', update);

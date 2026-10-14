@@ -7,6 +7,7 @@ import Settings from './Settings';
 export default function MainMenu() {
   const gameState = useGameStore((s) => s.gameState);
   const startGame = useGameStore((s) => s.startGame);
+  const worldReady = useGameStore((s) => s.worldReady);
   const [fadeIn, setFadeIn] = useState(false);
   const [subMenu, setSubMenu] = useState(null);
 
@@ -40,20 +41,20 @@ export default function MainMenu() {
       <div className="menu-content">
         {/* Title */}
         <div className="menu-title-section">
-          <div className="menu-subtitle">OPEN WORLD ACTION</div>
+          <div className="menu-subtitle">TACTICAL THIRD-PERSON SHOOTER</div>
           <h1 className="menu-title">
             <span className="title-shadow">SHADOW</span>
             <span className="title-strike">STRIKE</span>
           </h1>
-          <div className="menu-tagline">CITY AFTER DARK</div>
+          <div className="menu-tagline">LAST STAND</div>
           <div className="menu-divider" />
         </div>
 
         {/* Navigation */}
         <nav className="menu-nav">
-          <button id="btn-new-game" className="menu-btn" onClick={startGame}>
+          <button id="btn-new-game" className="menu-btn" onClick={startGame} disabled={!worldReady}>
             <span className="menu-btn-indicator" />
-            <span className="menu-btn-text">ENTER THE CITY</span>
+            <span className="menu-btn-text">{worldReady ? 'DEPLOY · OPERATION KESTREL' : 'PREPARING AREA OF OPERATIONS…'}</span>
             <span className="menu-btn-arrow">›</span>
           </button>
 
@@ -72,7 +73,7 @@ export default function MainMenu() {
 
         {/* Footer */}
         <div className="menu-footer">
-          <span>v1.0</span>
+          <span>v2.0</span>
           <span>SHADOW STRIKE</span>
         </div>
       </div>

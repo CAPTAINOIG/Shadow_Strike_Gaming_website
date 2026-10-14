@@ -1,41 +1,81 @@
 // Shadow Strike: Last Stand - Main Game Scene (3D Canvas)
 import React, { useEffect } from 'react';
-import { Canvas } from '@react-three/fiber';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
-import ChunkManager from './ChunkManager';
+import Battlefield from './Battlefield';
 import Player from './Player';
 import EnemyManager from './EnemyManager';
 import FriendlyManager from './FriendlyManager';
-import VehicleSystem from './VehicleSystem';
-import TrafficAI from './TrafficAI';
-import PedestrianAI from './PedestrianAI';
 import Effects from './Effects';
 import PostProcessing from './PostProcessing';
-import WantedSystem from './WantedSystem';
-import MissionSystem from './MissionSystem';
-import CityAtmosphere from './CityAtmosphere';
 import { useGameStore, GAME_STATES } from '../store/gameStore';
 import { combatSystem } from '../systems/combatSystem';
 import { audioManager } from '../systems/audioManager';
+import { loadSoldier } from './soldierAssets';
+
+// Slow aerial orbit over the combat zone behind the main menu.
+function MenuCamera() {
+  const camera = useThree((s) => s.camera);
+  useFrame(({ clock }) => {
+    const state = useGameStore.getState().gameState;
+    if (state !== GAME_STATES.MENU) return;
+    const t = clock.elapsedTime * 0.035;
+    camera.position.set(Math.sin(t) * 46 + 4, 15 + Math.sin(t * 1.7) * 2, -38 + Math.cos(t) * 46);
+    camera.lookAt(0, 2, -42);
+    if (camera.fov !== 55) { camera.fov = 55; camera.updateProjectionMatrix(); }
+    audioManager.updateListener(camera);
+  });
+  return null;
+}
+
+// Picks a starting quality from the GPU, then steps down if gameplay runs slowly.
+function QualityGovernor() {
+  const gl = useThree((s) => s.gl);
+  const sample = React.useRef({ frames: 0, time: 0, checks: 0 });
+  useEffect(() => {
+    const context = gl.getContext();
+    const info = context.getExtension('WEBGL_debug_renderer_info');
+    const renderer = info ? String(context.getParameter(info.UNMASKED_RENDERER_WEBGL)) : '';
+    const weakIntegrated = /Intel.*(HD|UHD) Graphics|Mali|Adreno|PowerVR|SwiftShader|llvmpipe/i.test(renderer) && !/Iris|Arc/i.test(renderer);
+    const mobile = window.matchMedia('(pointer: coarse)').matches && !window.matchMedia('(any-pointer: fine)').matches;
+    useGameStore.getState().setGraphicsQuality(weakIntegrated || mobile ? 'low' : 'medium');
+  }, [gl]);
+  useFrame((_, delta) => {
+    const store = useGameStore.getState();
+    if (store.gameState !== GAME_STATES.PLAYING) { sample.current.frames = 0; sample.current.time = 0; return; }
+    const s = sample.current;
+    s.frames += 1; s.time += delta;
+    if (s.time < 4) return;
+    const fps = s.frames / s.time;
+    s.frames = 0; s.time = 0; s.checks += 1;
+    if (fps < 24 && s.checks > 1) {
+      if (store.graphicsQuality === 'high') store.setGraphicsQuality('medium');
+      else if (store.graphicsQuality === 'medium') store.setGraphicsQuality('low');
+    }
+  });
+  return null;
+}
 
 function SceneContent() {
   const gameState = useGameStore((s) => s.gameState);
-  const selectedLevel = useGameStore((s) => s.selectedLevel);
-  const musicVolume = useGameStore((s) => s.musicVolume);
   const sfxVolume = useGameStore((s) => s.sfxVolume);
   const masterVolume = useGameStore((s) => s.masterVolume);
+  const musicVolume = useGameStore((s) => s.musicVolume);
 
-  // Initialize audio on first interaction
+  // Audio can only start after a user gesture.
   useEffect(() => {
     const initAudio = () => {
       audioManager.init();
-      window.removeEventListener('click', initAudio);
+      audioManager.ensureContext();
+      window.removeEventListener('pointerdown', initAudio);
       window.removeEventListener('keydown', initAudio);
     };
-    window.addEventListener('click', initAudio);
+    window.addEventListener('pointerdown', initAudio);
     window.addEventListener('keydown', initAudio);
+    // Start fetching the soldier while the menu is up.
+    loadSoldier().catch(() => {});
     return () => {
-      window.removeEventListener('click', initAudio);
+      window.removeEventListener('pointerdown', initAudio);
       window.removeEventListener('keydown', initAudio);
     };
   }, []);
@@ -43,35 +83,23 @@ function SceneContent() {
   useEffect(() => {
     audioManager.setMasterVolume(masterVolume);
     audioManager.setSfxVolume(sfxVolume);
-    if (gameState === GAME_STATES.PLAYING) {
-      audioManager.playLevelAmbience(selectedLevel, musicVolume * 0.45);
-      audioManager.playLoop('combat_music', musicVolume * 0.24);
-    } else {
-      audioManager.stopAmbientAndMusic();
-    }
-  }, [gameState, selectedLevel, musicVolume, masterVolume, sfxVolume]);
+    audioManager.setAmbienceVolume(musicVolume);
+    if (gameState === GAME_STATES.PLAYING) audioManager.startAmbience();
+    else if (gameState === GAME_STATES.MENU) audioManager.stopAmbience();
+  }, [gameState, masterVolume, sfxVolume, musicVolume]);
 
-  // Clear combat system when going back to menu
   useEffect(() => {
-    if (gameState === GAME_STATES.MENU) {
-      combatSystem.clear();
-    }
+    if (gameState === GAME_STATES.MENU) combatSystem.clear();
   }, [gameState]);
 
   return (
     <>
-      <color attach="background" args={['#9aaeb5']} />
-      <fog attach="fog" args={['#9aaeb5', 75, 390]} />
-      <CityAtmosphere />
-      <ChunkManager />
+      <QualityGovernor />
+      <Battlefield />
+      <MenuCamera />
       <Player />
       <EnemyManager />
       <FriendlyManager />
-      <VehicleSystem />
-      <TrafficAI />
-      <PedestrianAI />
-      <WantedSystem />
-      <MissionSystem />
       <Effects />
       <PostProcessing />
     </>
@@ -80,30 +108,19 @@ function SceneContent() {
 
 export default function GameScene() {
   const quality = useGameStore((state) => state.graphicsQuality);
-  const setGraphicsQuality = useGameStore((state) => state.setGraphicsQuality);
-  useEffect(() => {
-    const isMobile = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
-    setGraphicsQuality(isMobile || (navigator.deviceMemory && navigator.deviceMemory <= 4) ? 'low' : 'medium');
-  }, [setGraphicsQuality]);
+  // Low quality renders slightly below native resolution on weak GPUs.
+  const dpr = quality === 'low' ? Math.min(0.85, window.devicePixelRatio) : quality === 'medium' ? [1, 1.25] : [1, 1.6];
   return (
     <div style={{ position: 'absolute', inset: 0, zIndex: 0 }}>
       <Canvas
-        shadows={quality !== 'low'}
-        dpr={quality === 'low' ? 1 : quality === 'medium' ? [1, 1.15] : [1, 1.4]}
-        camera={{
-          fov: 60,
-          near: 0.1,
-          far: 200,
-          position: [0, 4, 12],
-        }}
-        gl={{
-          antialias: true,
-          toneMapping: THREE.ACESFilmicToneMapping,
-          toneMappingExposure: 1.05,
-        }}
-        onCreated={({ gl }) => {
-          gl.shadowMap.enabled = true;
-          gl.shadowMap.type = 2; // PCFSoftShadowMap
+        shadows={{ type: quality === 'high' ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap }}
+        dpr={dpr}
+        camera={{ fov: 55, near: 0.05, far: 900, position: [40, 16, 0] }}
+        gl={{ antialias: true, powerPreference: 'high-performance', stencil: false }}
+        onCreated={({ gl, scene, camera }) => {
+          if (import.meta.env.DEV) window.__three = { gl, scene, camera };
+          gl.toneMapping = THREE.ACESFilmicToneMapping;
+          gl.toneMappingExposure = 1.0;
           gl.outputColorSpace = THREE.SRGBColorSpace;
         }}
       >
